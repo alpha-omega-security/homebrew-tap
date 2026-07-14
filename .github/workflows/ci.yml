@@ -1,0 +1,224 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      casks:
+        description: Cask tokens to check, separated by spaces or commas. Defaults to all casks.
+        required: false
+        default: ""
+        type: string
+      install:
+        description: Install and uninstall selected casks after fetch and audit.
+        required: false
+        default: false
+        type: boolean
+
+defaults:
+  run:
+    shell: bash -xeuo pipefail {0}
+
+env:
+  HOMEBREW_DEVELOPER: 1
+  HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_ENV_HINTS: 1
+  HOMEBREW_NO_INSTALL_FROM_API: 1
+
+concurrency:
+  group: "ci-${{ github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  syntax:
+    name: Syntax
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      install: ${{ steps.casks.outputs.install }}
+      matrix: ${{ steps.casks.outputs.matrix }}
+      run_casks: ${{ steps.casks.outputs.run_casks }}
+    steps:
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@1f8e202ffddf94def7f42f6fa3a482e821489f9c # 2026.07.10.1
+        with:
+          core: true
+          cask: true
+          stable: false
+
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve cask list
+        id: casks
+        env:
+          INPUT_CASKS: ${{ inputs.casks }}
+          INPUT_INSTALL: ${{ inputs.install }}
+        run: |
+          tokens=()
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && -n "${INPUT_CASKS//[[:space:],]/}" ]]; then
+            normalized="${INPUT_CASKS//,/ }"
+            read -r -a tokens <<< "${normalized}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            base_ref="origin/${GITHUB_BASE_REF}"
+            if ! git rev-parse --verify --quiet "${base_ref}" >/dev/null; then
+              git fetch --no-tags origin "${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
+            fi
+            while IFS= read -r path; do
+              token="${path#Casks/}"
+              tokens+=("${token%.rb}")
+            done < <(git diff --name-only --diff-filter=ACMR "${base_ref}...HEAD" -- "Casks/*.rb")
+          else
+            # bash 3.2 on the macOS runner has no mapfile; read into the array.
+            while IFS= read -r token; do
+              tokens+=("${token}")
+            done < <(find Casks -maxdepth 1 -type f -name "*.rb" -exec basename {} .rb \; | sort)
+          fi
+
+          if [[ "${#tokens[@]}" -gt 0 ]]; then
+            deduped=()
+            while IFS= read -r token; do
+              deduped+=("${token}")
+            done < <(printf "%s\n" "${tokens[@]}" | sort -u)
+            tokens=("${deduped[@]}")
+          fi
+
+          if [[ "${#tokens[@]}" -eq 0 && "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
+            echo "::error::No casks selected"
+            exit 1
+          fi
+
+          if [[ "${#tokens[@]}" -eq 0 ]]; then
+            {
+              echo 'matrix={"include":[]}'
+              echo "run_casks=false"
+              echo "install=false"
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          run_casks=true
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            run_casks=false
+          fi
+
+          for token in "${tokens[@]}"; do
+            if [[ ! "${token}" =~ ^[a-z0-9][a-z0-9_.+-]*$ ]]; then
+              echo "::error::Invalid cask token: ${token}"
+              exit 1
+            fi
+            if [[ ! -f "Casks/${token}.rb" ]]; then
+              echo "::error::Unknown cask token: ${token}"
+              exit 1
+            fi
+          done
+
+          matrix_json="$(
+            printf "%s\n" "${tokens[@]}" | jq -R -s -c '
+              split("\n")[:-1] | {
+                include: (
+                  map(
+                    if . == "scrutineer" then
+                      [{cask: ., runner: "macos-26"}, {cask: ., runner: "ubuntu-24.04"}]
+                    else
+                      [{cask: ., runner: "macos-26"}]
+                    end
+                  ) | add
+                )
+              }
+            '
+          )"
+          echo "matrix=${matrix_json}" >> "${GITHUB_OUTPUT}"
+          echo "run_casks=${run_casks}" >> "${GITHUB_OUTPUT}"
+
+          install=false
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${INPUT_INSTALL}" == "true" ]]; then
+            install=true
+          fi
+          echo "install=${install}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify tap syntax
+        run: brew test-bot --tap "${GITHUB_REPOSITORY}" --only-tap-syntax
+
+  cask:
+    name: ${{ matrix.cask }} (${{ matrix.runner }})
+    needs: syntax
+    if: ${{ needs.syntax.outputs.run_casks == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.syntax.outputs.matrix) }}
+    steps:
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@1f8e202ffddf94def7f42f6fa3a482e821489f9c # 2026.07.10.1
+        with:
+          core: true
+          cask: true
+          stable: false
+
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch cask
+        env:
+          CASK: ${{ matrix.cask }}
+        run: brew fetch --cask --retry --force "${GITHUB_REPOSITORY}/${CASK}"
+        timeout-minutes: 30
+
+      - name: Audit cask
+        env:
+          CASK: ${{ matrix.cask }}
+        run: brew audit --cask --online --strict "${GITHUB_REPOSITORY}/${CASK}"
+        timeout-minutes: 30
+
+      - name: Install cask
+        id: install
+        if: needs.syntax.outputs.install == 'true'
+        env:
+          CASK: ${{ matrix.cask }}
+        run: brew install --cask "${GITHUB_REPOSITORY}/${CASK}"
+        timeout-minutes: 30
+
+      - name: Uninstall cask
+        if: always() && needs.syntax.outputs.install == 'true' && steps.install.outcome == 'success'
+        env:
+          CASK: ${{ matrix.cask }}
+        run: brew uninstall --cask --force "${CASK}"
+        timeout-minutes: 30
+
+  conclusion:
+    name: conclusion
+    needs:
+      - syntax
+      - cask
+    runs-on: ubuntu-slim
+    timeout-minutes: 15
+    if: always()
+    steps:
+      - name: Result
+        env:
+          CASK_RESULT: ${{ needs.cask.result }}
+          RUN_CASKS: ${{ needs.syntax.outputs.run_casks }}
+          SYNTAX_RESULT: ${{ needs.syntax.result }}
+        run: |
+          test "${SYNTAX_RESULT}" = "success"
+          if [[ "${RUN_CASKS}" == "true" ]]; then
+            test "${CASK_RESULT}" = "success"
+          fi
