@@ -10,6 +10,7 @@ The official [Homebrew](https://brew.sh) tap for
 
 ```sh
 brew tap alpha-omega-security/tap
+brew trust alpha-omega-security/tap
 brew install scrutineer
 ```
 
