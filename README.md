@@ -1,24 +1,25 @@
 # homebrew-tap
 
-[![CI](https://github.com/alpha-omega-security/homebrew-tap/actions/workflows/ci.yml/badge.svg)](https://github.com/alpha-omega-security/homebrew-tap/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+> [!IMPORTANT]
+> This tap is retired. Scrutineer is now available from
+> [Homebrew/core](https://github.com/Homebrew/homebrew-core).
 
-The official [Homebrew](https://brew.sh) tap for
-[Alpha-Omega Security](https://github.com/alpha-omega-security) software.
-
-## Usage
+Install Scrutineer directly from Homebrew:
 
 ```sh
-brew tap alpha-omega-security/tap
-brew trust alpha-omega-security/tap
 brew install scrutineer
 ```
 
-## Casks
+`brew update` redirects future installs to Homebrew/core; existing cask
+installs should be replaced with the formula and the tap removed:
 
-| Cask | Description |
-| --- | --- |
-| [`scrutineer`](https://github.com/alpha-omega-security/scrutineer) | Scan open source repositories for vulnerabilities and manage disclosures |
+```sh
+brew update
+brew uninstall --cask --force scrutineer   # remove the old tap cask if still present
+brew install scrutineer                     # install the Homebrew/core formula
+brew untap alpha-omega-security/tap
+brew untrust alpha-omega-security/tap
+```
 
 ## License
 
